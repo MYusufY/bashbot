@@ -6,6 +6,7 @@ import sounddevice as sd
 import soundfile as sf
 import numpy as np
 import os
+import time
 import asyncio
 import edge_tts
 from groq import Groq
@@ -18,12 +19,12 @@ width, height = screen.get_size()
 clock = pygame.time.Clock()
 font = pygame.font.SysFont('Arial', 30)
 pygame.camera.init()
+pygame.mouse.set_visible(False)
 
 eye_width, eye_height = 100, 150
 eye_color = (0, 255, 0)
 blink_time = 0
 recording = False
-vision_input = False
 audio_frames = []
 sample_rate = 16000
 stream = None
@@ -87,67 +88,69 @@ def transcribe_audio(filename):
             print(f"Transcription error: {e}")
             return "Error in transcription"
 
-def get_gemini_response(text, use_vision=False):
+def get_gemini_response(text):
     client = genai.Client(api_key=api_keys[0])
-    
-    if not use_vision:
-        print("Using regular text mode")
-        contents = [
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=text)],
-            ),
-        ]
-        generate_content_config = types.GenerateContentConfig(
-            response_mime_type="text/plain",
-            system_instruction=[
-                types.Part.from_text(text="Your name is bashbot. Answer the questions shortly, funny. Dont use emojis."),
-            ],
-        )
-        response = ""
-        for chunk in client.models.generate_content_stream(
-            model="gemini-2.0-flash",
-            contents=contents,
-            config=generate_content_config,
-        ):
-            if chunk.text:
-                response += chunk.text
-    else:
-        print("Using vision mode")
-        image = camera.get_image()        
-        pygame.image.save(image, "temp_img.jpg")
+    contents = [
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=text)],
+        ),
+    ]
+    generate_content_config = types.GenerateContentConfig(
+        response_mime_type="text/plain",
+        system_instruction=[
+            types.Part.from_text(text="Your name is bashbot. Answer the questions shortly, funny. Dont use emojis. If the prompt requires vision capabilites, like 'What color is this?', 'What am i holding?' etc. just say 'bbc_vision' and dont say anything else.'"),
+        ],
+    )
+    response = ""
+    for chunk in client.models.generate_content_stream(
+        model="gemini-2.0-flash",
+        contents=contents,
+        config=generate_content_config,
+    ):
+        if chunk.text:
+            response += chunk.text
         
-        with open('temp_img.jpg', 'rb') as f:
-            image_bytes = f.read()
+        if "bbc_vision" in response and len(response)<=12:
+            print("Using vision mode")
+            os.remove("temp_img.jpg")
+            camera.stop()
+            time.sleep(0.5)
+            camera.start()
+            image = camera.get_image()        
+            pygame.image.save(image, "temp_img.jpg")
+            
+            with open('temp_img.jpg', 'rb') as f:
+                image_bytes = f.read()
 
-        contents = [
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part.from_bytes(
-                        data=image_bytes,
-                        mime_type='image/jpeg'
-                    ),
-                    types.Part.from_text(text=text)
-                ]
+            contents = [
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_bytes(
+                            data=image_bytes,
+                            mime_type='image/jpeg'
+                        ),
+                        types.Part.from_text(text=text)
+                    ]
+                )
+            ]
+            
+            generate_content_config = types.GenerateContentConfig(
+                response_mime_type="text/plain",
+                system_instruction=[
+                    types.Part.from_text(text="Your name is bashbot. Answer the questions shortly, funny. Dont use emojis."),
+                ],
             )
-        ]
-        
-        generate_content_config = types.GenerateContentConfig(
-            response_mime_type="text/plain",
-            system_instruction=[
-                types.Part.from_text(text="Your name is bashbot. Answer the questions shortly, funny. Dont use emojis."),
-            ],
-        )
-        
-        response = ""
-        for chunk in client.models.generate_content_stream(
-            model="gemini-2.0-flash",
-            contents=contents,
-            config=generate_content_config,
-        ):
-            if chunk.text:
-                response += chunk.text
+            
+            response = ""
+            for chunk in client.models.generate_content_stream(
+                model="gemini-2.0-flash",
+                contents=contents,
+                config=generate_content_config,
+            ):
+                if chunk.text:
+                    response += chunk.text
     
     return response
 
@@ -155,7 +158,6 @@ async def main_loop():
     global recording, audio_frames, stream, transcription_text, gemini_response
     global typing_text, typing_index, typing_delay, last_dot_change
     global listening_dots, tts_task, running, text_alpha, text_fade_start, text_display_start
-    global vision_input
     
     blink_time = 0
 
@@ -167,7 +169,6 @@ async def main_loop():
                 running = False
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and not recording:
                 recording = True
-                vision_input = False
                 audio_frames = []
                 stream = sd.InputStream(callback=record_callback, channels=1, samplerate=sample_rate)
                 stream.start()
@@ -181,37 +182,13 @@ async def main_loop():
                     audio_data = np.concatenate(audio_frames)
                     sf.write('recording.mp3', audio_data, sample_rate)
                     transcription_text = transcribe_audio('recording.mp3')
-                    gemini_response = get_gemini_response(transcription_text, use_vision=False)
+                    gemini_response = get_gemini_response(transcription_text)
                     typing_text = gemini_response
                     typing_index = 0
                     typing_delay = 0
                     if tts_task and not tts_task.done():
                         tts_task.cancel()
                     tts_task = asyncio.create_task(speak_text(gemini_response))
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_a and not recording:
-                recording = True
-                vision_input = True
-                audio_frames = []
-                stream = sd.InputStream(callback=record_callback, channels=1, samplerate=sample_rate)
-                stream.start()
-                listening_dots = 0
-                last_dot_change = current_time
-            elif event.type == pygame.KEYUP and event.key == pygame.K_a and recording:
-                recording = False
-                stream.stop()
-                stream.close()
-                if audio_frames:
-                    audio_data = np.concatenate(audio_frames)
-                    sf.write('recording.mp3', audio_data, sample_rate)
-                    transcription_text = transcribe_audio('recording.mp3')
-                    gemini_response = get_gemini_response(transcription_text, use_vision=vision_input)
-                    typing_text = gemini_response
-                    typing_index = 0
-                    typing_delay = 0
-                    if tts_task and not tts_task.done():
-                        tts_task.cancel()
-                    tts_task = asyncio.create_task(speak_text(gemini_response))
-                vision_input = False
 
         screen.fill((0, 0, 0))
 
@@ -227,7 +204,7 @@ async def main_loop():
                 last_dot_change = current_time
                 listening_dots = (listening_dots + 1) % 4
             dots = "." * listening_dots
-            status_text = font.render(f"{'Looking & Listening' if vision_input else 'Listening'}{dots}", True, (255, 255, 255))
+            status_text = font.render(f"{'Listening'}{dots}", True, (255, 255, 255))
             screen.blit(status_text, (width//2 - status_text.get_width()//2, height//2 + 100))
         
         if typing_text and text_display_start > 0:
