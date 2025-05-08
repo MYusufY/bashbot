@@ -1,0 +1,7 @@
+SoundFile
+edge_tts
+google-genai
+groq
+numpy
+pygame
+sounddevice
