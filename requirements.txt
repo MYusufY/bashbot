@@ -1,3 +1,4 @@
+pygame
 SoundFile
 edge_tts
 google-genai
