@@ -42,6 +42,8 @@ text_alpha = 0
 text_fade_start = 0
 text_fade_duration = 0
 text_display_start = 0
+exit_area_size = 80
+mouse_recording = False
 
 cam_list = pygame.camera.list_cameras()
 if not cam_list:
@@ -50,7 +52,7 @@ camera = pygame.camera.Camera(cam_list[0])
 camera.start()
 
 try:
-    with open("api.txt", "r") as f:
+    with open("/home/pi/Desktop/bashbot/api.txt", "r") as f:
         api_keys = [line.strip() for line in f.readlines()]
     if len(api_keys) < 2:
         print("Error: api.txt needs 2 lines (Gemini and Groq keys)")
@@ -63,8 +65,8 @@ async def speak_text(text):
     global text_display_start, text_fade_duration
     try:
         communicate = edge_tts.Communicate(text)
-        await communicate.save("response.mp3")
-        os.system("mpg123 response.mp3 &") 
+        await communicate.save("/home/pi/Desktop/bashbot/response.mp3")
+        os.system("mpg123 /home/pi/Desktop/bashbot/response.mp3 &") 
         text_fade_duration = len(text) * 50 + 3600
         text_display_start = pygame.time.get_ticks()
     except Exception as e:
@@ -99,7 +101,7 @@ def get_gemini_response(text):
     generate_content_config = types.GenerateContentConfig(
         response_mime_type="text/plain",
         system_instruction=[
-            types.Part.from_text(text="Your name is bashbot. Answer the questions shortly, funny. Dont use emojis. If the prompt requires vision capabilites, like 'What color is this?', 'What am i holding?' etc. just say 'bbc_vision' and dont say anything else.'"),
+            types.Part.from_text(text="Your name is BashBot. Answer the questions shortly, funny. Dont use emojis. If the prompt requires vision capabilites, like 'What color is this?', 'What am i holding?', 'What is this?' etc. just say 'bbc_vision' and dont say anything else."),
         ],
     )
     response = ""
@@ -113,14 +115,14 @@ def get_gemini_response(text):
         
         if "bbc_vision" in response and len(response)<=12:
             print("Using vision mode")
-            os.remove("temp_img.jpg")
+            os.remove("/home/pi/Desktop/bashbot/temp_img.jpg")
             camera.stop()
             time.sleep(0.5)
             camera.start()
-            image = camera.get_image()        
-            pygame.image.save(image, "temp_img.jpg")
-            
-            with open('temp_img.jpg', 'rb') as f:
+            image = camera.get_image()
+            pygame.image.save(image, "/home/pi/Desktop/bashbot/temp_img.jpg")
+
+            with open('/home/pi/Desktop/bashbot/temp_img.jpg', 'rb') as f:
                 image_bytes = f.read()
 
             contents = [
@@ -139,7 +141,7 @@ def get_gemini_response(text):
             generate_content_config = types.GenerateContentConfig(
                 response_mime_type="text/plain",
                 system_instruction=[
-                    types.Part.from_text(text="Your name is bashbot. Answer the questions shortly, funny. Dont use emojis."),
+                    types.Part.from_text(text="Your name is BashBot. Answer the questions shortly, funny. Dont use emojis."),
                 ],
             )
             
@@ -154,10 +156,40 @@ def get_gemini_response(text):
     
     return response
 
+def start_recording():
+    global recording, audio_frames, stream, listening_dots, last_dot_change
+    recording = True
+    audio_frames = []
+    stream = sd.InputStream(callback=record_callback, channels=1, samplerate=sample_rate)
+    stream.start()
+    listening_dots = 0
+    last_dot_change = pygame.time.get_ticks()
+
+def stop_recording():
+    global recording, stream, transcription_text, gemini_response, typing_text, typing_index, typing_delay, tts_task
+    recording = False
+    stream.stop()
+    stream.close()
+    if audio_frames:
+        audio_data = np.concatenate(audio_frames)
+        sf.write('/home/pi/Desktop/bashbot/recording.mp3', audio_data, sample_rate)
+        transcription_text = transcribe_audio('/home/pi/Desktop/bashbot/recording.mp3')
+        gemini_response = get_gemini_response(transcription_text)
+        typing_text = gemini_response
+        typing_index = 0
+        typing_delay = 0
+        if tts_task and not tts_task.done():
+            tts_task.cancel()
+        tts_task = asyncio.create_task(speak_text(gemini_response))
+
+def is_in_exit_area(pos):
+    return pos[0] < exit_area_size and pos[1] < exit_area_size
+
 async def main_loop():
     global recording, audio_frames, stream, transcription_text, gemini_response
     global typing_text, typing_index, typing_delay, last_dot_change
     global listening_dots, tts_task, running, text_alpha, text_fade_start, text_display_start
+    global mouse_recording
     
     blink_time = 0
 
@@ -168,27 +200,19 @@ async def main_loop():
             if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
                 running = False
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and not recording:
-                recording = True
-                audio_frames = []
-                stream = sd.InputStream(callback=record_callback, channels=1, samplerate=sample_rate)
-                stream.start()
-                listening_dots = 0
-                last_dot_change = current_time
+                start_recording()
             elif event.type == pygame.KEYUP and event.key == pygame.K_SPACE and recording:
-                recording = False
-                stream.stop()
-                stream.close()
-                if audio_frames:
-                    audio_data = np.concatenate(audio_frames)
-                    sf.write('recording.mp3', audio_data, sample_rate)
-                    transcription_text = transcribe_audio('recording.mp3')
-                    gemini_response = get_gemini_response(transcription_text)
-                    typing_text = gemini_response
-                    typing_index = 0
-                    typing_delay = 0
-                    if tts_task and not tts_task.done():
-                        tts_task.cancel()
-                    tts_task = asyncio.create_task(speak_text(gemini_response))
+                stop_recording()
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if is_in_exit_area(event.pos):
+                    running = False
+                elif not recording and not mouse_recording:
+                    mouse_recording = True
+                    start_recording()
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1 and mouse_recording:
+                mouse_recording = False
+                if recording:
+                    stop_recording()
 
         screen.fill((0, 0, 0))
 
